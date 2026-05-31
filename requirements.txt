@@ -1,5 +1,14 @@
+# Environment: Python 3.10 + PyTorch 2.6.0 + CUDA 12.4
+# Install PyTorch first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# Then install this file with:
+#   pip install --no-build-isolation -r requirements.txt
+
+# CUDA extensions (require --no-build-isolation since setup.py imports torch)
 submodules/depth-diff-gaussian-rasterization
 submodules/simple-knn
+
+# Python dependencies
 plyfile==0.8.1
 tqdm
 imageio==2.27.0
