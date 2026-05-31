@@ -53,14 +53,24 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     return np.float32(Rt)
 
 
-def getProjectionMatrix(znear, zfar, fovX, fovY):
+def getProjectionMatrix(znear, zfar, fovX, fovY, cx=None, cy=None, width=None, height=None):
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
 
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
+    if cx is not None and width is not None:
+        # Off-axis frustum: shift it so the optical axis projects to pixel
+        # (cx, cy) instead of the image centre. Equivalent to setting
+        # P[0,2]=2cx/W-1 and P[1,2]=2cy/H-1. x and y share the same sign
+        # because the rasterizer's ndc2Pix treats both axes identically.
+        right = 2.0 * tanHalfFovX * znear * cx / width
+        left = 2.0 * tanHalfFovX * znear * (cx - width) / width
+        top = 2.0 * tanHalfFovY * znear * cy / height
+        bottom = 2.0 * tanHalfFovY * znear * (cy - height) / height
+    else:
+        top = tanHalfFovY * znear
+        bottom = -top
+        right = tanHalfFovX * znear
+        left = -right
 
     P = torch.zeros(4, 4)
 
