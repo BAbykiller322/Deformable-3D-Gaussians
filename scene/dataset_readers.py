@@ -41,6 +41,8 @@ class CameraInfo(NamedTuple):
     height: int
     fid: float
     depth: Optional[np.array] = None
+    cx: Optional[float] = None
+    cy: Optional[float] = None
 
 
 class SceneInfo(NamedTuple):
@@ -510,6 +512,114 @@ def readNerfiesInfo(path, eval):
     return scene_info
 
 
+def readDyCheckCameras(path, ratio=0.5):
+    """DyCheck (iPhone) scene reader.
+
+    The per-frame camera/*.json format is IDENTICAL to nerfies, so the
+    per-frame parsing (camera_nerfies_from_JSON) and the R/T/Fov packing are
+    reused verbatim. Only three things differ from readNerfiesCameras and are
+    fixed here:
+      1. train/test split comes from splits/{train,val}.json frame_names
+         (official protocol: train = cam0, val = cam1+cam2), NOT dir-name
+         guessing or dataset.json ids[::4].
+      2. the per-frame time index is metadata['warp_id'] (DyCheck has no
+         'time_id' key).
+      3. fid is normalised by the GLOBAL max warp_id so train (cam0) and test
+         (cam1/cam2) share one time axis. ratio=0.5 selects the rgb/2x images
+         (half of 720x960 -> 360x480), a good fit for 8GB VRAM; set ratio=1.0
+         to use rgb/1x (full res).
+    """
+    with open(f'{path}/scene.json', 'r') as f:
+        scene_json = json.load(f)
+    coord_scale = scene_json['scale']
+    scene_center = np.array(scene_json['center'])
+
+    with open(f'{path}/metadata.json', 'r') as f:
+        meta_json = json.load(f)
+    with open(f'{path}/splits/train.json', 'r') as f:
+        train_split = json.load(f)
+    with open(f'{path}/splits/val.json', 'r') as f:
+        val_split = json.load(f)
+
+    train_frames = train_split['frame_names']      # cam0 (475)
+    test_frames = val_split['frame_names']         # cam1 + cam2 (532)
+    all_img = train_frames + test_frames
+    train_num = len(train_frames)
+
+    # GLOBAL time normalisation: one denominator shared by every camera.
+    max_warp = max(v['warp_id'] for v in meta_json.values())
+    all_time = [meta_json[fn]['warp_id'] / max_warp for fn in all_img]
+
+    # --- per-frame camera params (reused from nerfies) ---
+    all_cam_params = []
+    for im in all_img:
+        camera = camera_nerfies_from_JSON(f'{path}/camera/{im}.json', ratio)
+        camera['position'] = (camera['position'] - scene_center) * coord_scale
+        all_cam_params.append(camera)
+
+    res_dir = f'{int(1 / ratio)}x'                 # ratio 0.5 -> "2x"
+    all_img_path = [f'{path}/rgb/{res_dir}/{i}.png' for i in all_img]
+
+    # --- build CameraInfo per frame (reused from nerfies) ---
+    cam_infos = []
+    for idx in range(len(all_img_path)):
+        image_path = all_img_path[idx]
+        image = np.array(Image.open(image_path))
+        image = Image.fromarray(image.astype(np.uint8))
+        image_name = Path(image_path).stem
+
+        orientation = all_cam_params[idx]['orientation'].T
+        position = -all_cam_params[idx]['position'] @ orientation
+        focal = all_cam_params[idx]['focal_length']
+        fid = all_time[idx]
+        T = position
+        R = orientation
+        FovY = focal2fov(focal, image.size[1])
+        FovX = focal2fov(focal, image.size[0])
+        cx, cy = all_cam_params[idx]['principal_point']
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                                    image=image, image_path=image_path,
+                                    image_name=image_name, width=image.size[0],
+                                    height=image.size[1], fid=fid,
+                                    cx=float(cx), cy=float(cy)))
+    sys.stdout.write('\n')
+    return cam_infos, train_num, scene_center, coord_scale
+
+
+def readDyCheckInfo(path, eval):
+    print("Reading DyCheck (iPhone) Info")
+    cam_infos, train_num, scene_center, scene_scale = readDyCheckCameras(path)
+
+    if eval:
+        train_cam_infos = cam_infos[:train_num]
+        test_cam_infos = cam_infos[train_num:]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        print("Generating point cloud from DyCheck points.npy ...")
+        xyz = np.load(os.path.join(path, "points.npy"))
+        xyz = (xyz - scene_center) * scene_scale
+        num_pts = xyz.shape[0]
+        shs = np.random.random((num_pts, 3)) / 255.0
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+
 def readCamerasFromNpy(path, npy_file, split, hold_id, num_images):
     cam_infos = []
     video_paths = sorted(glob(os.path.join(path, 'frames/*')))
@@ -602,5 +712,6 @@ sceneLoadTypeCallbacks = {
     "Blender": readNerfSyntheticInfo,  # D-NeRF dataset [https://drive.google.com/file/d/1uHVyApwqugXTFuIRRlE4abTW8_rrVeIK/view?usp=sharing]
     "DTU": readNeuSDTUInfo,  # DTU dataset used in Tensor4D [https://github.com/DSaurus/Tensor4D]
     "nerfies": readNerfiesInfo,  # NeRFies & HyperNeRF dataset proposed by [https://github.com/google/hypernerf/releases/tag/v0.1]
+    "DyCheck": readDyCheckInfo,  # DyCheck iPhone dataset [https://github.com/KAIR-BAIR/dycheck]
     "plenopticVideo": readPlenopticVideoDataset,  # Neural 3D dataset in [https://github.com/facebookresearch/Neural_3D_Video]
 }

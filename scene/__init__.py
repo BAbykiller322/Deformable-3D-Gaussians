@@ -50,6 +50,9 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "cameras_sphere.npz")):
             print("Found cameras_sphere.npz file, assuming DTU data set!")
             scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras_sphere.npz", "cameras_sphere.npz")
+        elif os.path.exists(os.path.join(args.source_path, "splits")):
+            print("Found splits/ folder, assuming DyCheck (iPhone) data set!")
+            scene_info = sceneLoadTypeCallbacks["DyCheck"](args.source_path, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "dataset.json")):
             print("Found dataset.json file, assuming Nerfies data set!")
             scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, args.eval)
