@@ -30,10 +30,12 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
+    mask_path = os.path.join(model_path, name, "ours_{}".format(iteration), "masks")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
+    makedirs(mask_path, exist_ok=True)
 
     t_list = []
 
@@ -53,6 +55,9 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+        # Save the covisibility mask (test frames only) for masked metrics.
+        if view.mask is not None:
+            torchvision.utils.save_image(view.mask.float(), os.path.join(mask_path, '{0:05d}'.format(idx) + ".png"))
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         fid = view.fid
