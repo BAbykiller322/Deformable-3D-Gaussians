@@ -43,6 +43,7 @@ class CameraInfo(NamedTuple):
     depth: Optional[np.array] = None
     cx: Optional[float] = None
     cy: Optional[float] = None
+    mask: Optional[np.array] = None      # DyCheck covisibility mask (test frames only)
 
 
 class SceneInfo(NamedTuple):
@@ -577,11 +578,24 @@ def readDyCheckCameras(path, ratio=0.5):
         FovY = focal2fov(focal, image.size[1])
         FovX = focal2fov(focal, image.size[0])
         cx, cy = all_cam_params[idx]['principal_point']
+
+        # Covisibility mask: test frames (cam1/cam2, idx >= train_num) only.
+        # DyCheck ships it at 2x; resize to the image size with NEAREST so the
+        # {0,1} values are not blurred. Stored as a float32 {0,1} HxW array.
+        mask = None
+        if idx >= train_num:
+            mask_path = f'{path}/covisible/2x/val/{all_img[idx]}.png'
+            if os.path.exists(mask_path):
+                m = Image.open(mask_path).convert('L')
+                if m.size != image.size:
+                    m = m.resize(image.size, Image.NEAREST)
+                mask = (np.array(m) > 0).astype(np.float32)
+
         cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
                                     image=image, image_path=image_path,
                                     image_name=image_name, width=image.size[0],
                                     height=image.size[1], fid=fid,
-                                    cx=float(cx), cy=float(cy)))
+                                    cx=float(cx), cy=float(cy), mask=mask))
     sys.stdout.write('\n')
     return cam_infos, train_num, scene_center, coord_scale
 

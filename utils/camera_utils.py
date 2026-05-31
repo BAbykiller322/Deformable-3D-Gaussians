@@ -11,6 +11,7 @@
 
 from scene.cameras import Camera
 import numpy as np
+from PIL import Image
 from utils.general_utils import PILtoTorch, ArrayToTorch
 from utils.graphics_utils import fov2focal
 import json
@@ -55,12 +56,21 @@ def loadCam(args, id, cam_info, resolution_scale):
         cx = cx * resolution[0] / orig_w
         cy = cy * resolution[1] / orig_h
 
+    # Resize the covisibility mask to the render resolution with NEAREST
+    # (keep the {0,1} values crisp), returning an HxW float32 {0,1} array.
+    mask = cam_info.mask
+    if mask is not None:
+        m = Image.fromarray((mask * 255).astype(np.uint8))
+        if m.size != tuple(resolution):
+            m = m.resize(resolution, Image.NEAREST)
+        mask = (np.array(m) > 0).astype(np.float32)
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id,
                   data_device=args.data_device if not args.load2gpu_on_the_fly else 'cpu', fid=cam_info.fid,
-                  depth=cam_info.depth, cx=cx, cy=cy)
+                  depth=cam_info.depth, cx=cx, cy=cy, mask=mask)
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

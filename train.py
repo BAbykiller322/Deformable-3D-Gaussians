@@ -131,8 +131,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                                        testing_iterations, scene, render, (pipe, background), deform,
                                        dataset.load2gpu_on_the_fly, dataset.is_6dof)
             if iteration in testing_iterations:
-                if cur_psnr.item() > best_psnr:
-                    best_psnr = cur_psnr.item()
+                if cur_psnr > best_psnr:
+                    best_psnr = cur_psnr
                     best_iteration = iteration
 
             if iteration in saving_iterations:
@@ -206,8 +206,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
-                images = torch.tensor([], device="cuda")
-                gts = torch.tensor([], device="cuda")
+                # Per-frame metrics accumulated as scalars: never hold all views
+                # in GPU memory at once (the old code cat'd every render+gt, which
+                # is ~2GB for the 532 DyCheck test views and OOMs on 8GB).
+                psnr_list = []
+                l1_list = []
                 for idx, viewpoint in enumerate(config['cameras']):
                     if load2gpu_on_the_fly:
                         viewpoint.load2device()
@@ -219,8 +222,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, is_6dof)["render"],
                         0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    images = torch.cat((images, image.unsqueeze(0)), dim=0)
-                    gts = torch.cat((gts, gt_image.unsqueeze(0)), dim=0)
+
+                    # DyCheck covisibility-masked metrics: average only over the
+                    # covisible pixels (mMSE = sum m*(r-gt)^2 / (C * sum m)).
+                    # Test frames carry a mask; train sanity views do not, so they
+                    # fall back to full-image metrics.
+                    if viewpoint.mask is not None:
+                        m = viewpoint.mask.to(image.device)
+                        denom = m.sum() * image.shape[0] + 1e-8
+                        mse = (m * (image - gt_image) ** 2).sum() / denom
+                        l1_f = (m * (image - gt_image).abs()).sum() / denom
+                    else:
+                        mse = ((image - gt_image) ** 2).mean()
+                        l1_f = (image - gt_image).abs().mean()
+                    psnr_list.append((-10.0 * torch.log10(mse)).item())
+                    l1_list.append(l1_f.item())
 
                     if load2gpu_on_the_fly:
                         viewpoint.load2device('cpu')
@@ -231,14 +247,16 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name),
                                                  gt_image[None], global_step=iteration)
 
-                l1_test = l1_loss(images, gts)
-                psnr_test = psnr(images, gts).mean()
+                l1_test = sum(l1_list) / len(l1_list)
+                psnr_test_cfg = sum(psnr_list) / len(psnr_list)
                 if config['name'] == 'test' or len(validation_configs[0]['cameras']) == 0:
-                    test_psnr = psnr_test
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                    test_psnr = psnr_test_cfg
+                metric_tag = 'mPSNR' if config['name'] == 'test' else 'PSNR'
+                print("\n[ITER {}] Evaluating {}: L1 {:.4f} {} {:.4f}".format(
+                    iteration, config['name'], l1_test, metric_tag, psnr_test_cfg))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test_cfg, iteration)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
