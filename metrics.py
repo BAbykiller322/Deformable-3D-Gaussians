@@ -76,38 +76,49 @@ def evaluate(model_paths):
                 masks_dir = method_dir / "masks"
                 renders, gts, masks, image_names = readImages(renders_dir, gt_dir, masks_dir)
 
-                ssims = []
+                ssims = []          # full-image (backbone-native)
                 psnrs = []
                 lpipss = []
+                mssims = []         # DyCheck covisibility-masked (test frames)
+                mpsnrs = []
+                mlpipss = []
 
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                     r, g, m = renders[idx], gts[idx], masks[idx]
+                    # full-image metrics (always)
+                    psnrs.append(psnr(r, g).item())
+                    ssims.append(ssim(r, g).item())
+                    lpipss.append(lpips_fn(r, g).detach().item())
+                    # covisibility-masked metrics (when a mask is present):
+                    # mPSNR over covisible pixels; mSSIM (SSIM map averaged over the
+                    # mask); mLPIPS on the mask-composited images.
                     if m is not None:
-                        # DyCheck covisibility-masked metrics (mPSNR/mSSIM/mLPIPS):
-                        # PSNR over covisible pixels; SSIM map averaged over the
-                        # mask; LPIPS on the mask-composited images.
                         denom = m.sum() * r.shape[1] + 1e-8
-                        mse = (m * (r - g) ** 2).sum() / denom
-                        psnrs.append((-10.0 * torch.log10(mse)).item())
-                        ssims.append(ssim(r, g, mask=m).item())
-                        lpipss.append(lpips_fn(r * m, g * m).detach().item())
-                    else:
-                        psnrs.append(psnr(r, g).item())
-                        ssims.append(ssim(r, g).item())
-                        lpipss.append(lpips_fn(r, g).detach().item())
+                        mmse = (m * (r - g) ** 2).sum() / denom
+                        mpsnrs.append((-10.0 * torch.log10(mmse)).item())
+                        mssims.append(ssim(r, g, mask=m).item())
+                        mlpipss.append(lpips_fn(r * m, g * m).detach().item())
 
-                pfx = "m" if any(mm is not None for mm in masks) else " "
-                print("  {}SSIM : {:>12.7f}".format(pfx, torch.tensor(ssims).mean()))
-                print("  {}PSNR : {:>12.7f}".format(pfx, torch.tensor(psnrs).mean()))
-                print("  {}LPIPS: {:>12.7f}".format(pfx, torch.tensor(lpipss).mean()))
+                print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean()))
+                print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean()))
+                print("  LPIPS: {:>12.7f}".format(torch.tensor(lpipss).mean()))
+                if len(mpsnrs) > 0:
+                    print("  mSSIM : {:>11.7f}".format(torch.tensor(mssims).mean()))
+                    print("  mPSNR : {:>11.7f}".format(torch.tensor(mpsnrs).mean()))
+                    print("  mLPIPS: {:>11.7f}".format(torch.tensor(mlpipss).mean()))
                 print("")
 
-                full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
-                                                     "PSNR": torch.tensor(psnrs).mean().item(),
-                                                     "LPIPS": torch.tensor(lpipss).mean().item()})
+                results = {"SSIM": torch.tensor(ssims).mean().item(),
+                           "PSNR": torch.tensor(psnrs).mean().item(),
+                           "LPIPS": torch.tensor(lpipss).mean().item()}
+                if len(mpsnrs) > 0:
+                    results.update({"mSSIM": torch.tensor(mssims).mean().item(),
+                                    "mPSNR": torch.tensor(mpsnrs).mean().item(),
+                                    "mLPIPS": torch.tensor(mlpipss).mean().item()})
+                full_dict[scene_dir][method].update(results)
                 per_view_dict[scene_dir][method].update(
-                    {"SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
-                     "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
+                    {"SSIM": {name: s for s, name in zip(torch.tensor(ssims).tolist(), image_names)},
+                     "PSNR": {name: p for p, name in zip(torch.tensor(psnrs).tolist(), image_names)},
                      "LPIPS": {name: lp for lp, name in zip(torch.tensor(lpipss).tolist(), image_names)}})
 
             with open(scene_dir + "/results.json", 'w') as fp:
