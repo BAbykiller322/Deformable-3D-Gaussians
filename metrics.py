@@ -20,6 +20,7 @@ import lpips
 import json
 from tqdm import tqdm
 from utils.image_utils import psnr
+from utils.dycheck_metrics import compute_mpsnr, compute_mssim, compute_mlpips
 from argparse import ArgumentParser
 
 
@@ -85,19 +86,21 @@ def evaluate(model_paths):
 
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                     r, g, m = renders[idx], gts[idx], masks[idx]
-                    # full-image metrics (always)
+                    # full-image metrics (always); backbone-native, vgg LPIPS is
+                    # the 3DGS reporting convention (normalize=True maps [0,1]->[-1,1]).
                     psnrs.append(psnr(r, g).item())
                     ssims.append(ssim(r, g).item())
-                    lpipss.append(lpips_fn(r, g).detach().item())
-                    # covisibility-masked metrics (when a mask is present):
-                    # mPSNR over covisible pixels; mSSIM (SSIM map averaged over the
-                    # mask); mLPIPS on the mask-composited images.
+                    lpipss.append(lpips_vgg(r, g, normalize=True).detach().item())
+                    # DyCheck covisibility-masked metrics (official protocol), via the
+                    # vendored Shape-of-Motion port so they are directly comparable to
+                    # the published MoSca / Dynamic Gaussian Marbles numbers.
                     if m is not None:
-                        denom = m.sum() * r.shape[1] + 1e-8
-                        mmse = (m * (r - g) ** 2).sum() / denom
-                        mpsnrs.append((-10.0 * torch.log10(mmse)).item())
-                        mssims.append(ssim(r, g, mask=m).item())
-                        mlpipss.append(lpips_fn(r * m, g * m).detach().item())
+                        pr = r.permute(0, 2, 3, 1).contiguous()   # (1,H,W,3)
+                        gt = g.permute(0, 2, 3, 1).contiguous()
+                        mk = m[:, 0]                              # (1,H,W)
+                        mpsnrs.append(compute_mpsnr(pr, gt, mk))
+                        mssims.append(compute_mssim(pr, gt, mk))
+                        mlpipss.append(compute_mlpips(pr, gt, lpips_alex, mk))
 
                 print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean()))
                 print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean()))
@@ -132,7 +135,12 @@ def evaluate(model_paths):
 if __name__ == "__main__":
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    lpips_fn = lpips.LPIPS(net='vgg').to(device)
+    # Two LPIPS models, on purpose:
+    #   lpips_vgg  : full-image LPIPS (3DGS / Deformable-3DGS reporting convention).
+    #   lpips_alex : DyCheck official mLPIPS backbone (AlexNet, spatial map) for the
+    #                masked metrics. Kept separate so each column matches its protocol.
+    lpips_vgg = lpips.LPIPS(net='vgg').to(device).eval()
+    lpips_alex = lpips.LPIPS(net='alex', spatial=True).to(device).eval()
 
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
