@@ -51,7 +51,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     best_psnr = 0.0
     best_iteration = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
-    smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
+    smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=opt.iterations)
     for iteration in range(1, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -162,7 +162,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 deform.optimizer.zero_grad()
                 deform.update_learning_rate(iteration)
 
-    print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
+    print("Best test mPSNR/PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
 
 def prepare_output_and_logger(args):
@@ -283,11 +283,11 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[5000, 6000, 7_000] + list(range(10000, 40001, 1000)))
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 40000])
+                        default=list(range(1000, 12001, 1000)))
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[3000, 5000, 7000, 10000, 12000])
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+    args.save_iterations = sorted(set(args.save_iterations + [args.iterations]))
 
     print("Optimizing " + args.model_path)
 
