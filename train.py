@@ -17,6 +17,7 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel, DeformModel
 from utils.general_utils import safe_state, get_linear_noise_func
+from utils.traj_supervision_utils import TrajectorySupervisor, TrajectorySupervisorConfig
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -39,6 +40,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    traj_supervisor = None
+    if opt.lambda_traj > 0.0:
+        if not opt.traj_tracks_path or not opt.traj_anchors_path:
+            raise ValueError("lambda_traj > 0 requires traj_tracks_path and traj_anchors_path")
+        traj_config = TrajectorySupervisorConfig(
+            tracks_path=opt.traj_tracks_path,
+            anchors_path=opt.traj_anchors_path,
+            strategy=opt.traj_strategy,
+            lambda_traj=opt.lambda_traj,
+            start_iter=opt.traj_start_iter,
+            num_tracks_per_iter=opt.traj_num_tracks_per_iter,
+            robust_delta=opt.traj_robust_delta,
+            learnable_anchors=False,
+        )
+        traj_supervisor = TrajectorySupervisor(traj_config, device="cuda")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -105,7 +121,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        loss_traj = image_loss.new_zeros(())
+        traj_log = {}
+
+        if traj_supervisor is not None:
+            loss_traj, traj_log = traj_supervisor.compute_loss(
+                iteration=iteration,
+                viewpoint_cam=viewpoint_cam,
+                deform_model=deform,
+            )
+
+        loss = image_loss + opt.lambda_traj * loss_traj
         loss.backward()
 
         iter_end.record()
@@ -117,7 +144,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                postfix = {"Loss": f"{ema_loss_for_log:.{7}f}"}
+                if traj_log.get("traj_enabled", 0.0):
+                    postfix["Traj"] = f"{loss_traj.item():.{4}f}"
+                    postfix["TrajValid"] = int(traj_log.get("traj_num_valid", 0.0))
+                progress_bar.set_postfix(postfix)
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -130,6 +161,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                                        testing_iterations, scene, render, (pipe, background), deform,
                                        dataset.load2gpu_on_the_fly, dataset.is_6dof)
+            if tb_writer and traj_log:
+                tb_writer.add_scalar('train_loss_patches/traj_loss', loss_traj.item(), iteration)
+                for key, value in traj_log.items():
+                    tb_writer.add_scalar(f'train_traj/{key}', value, iteration)
             if iteration in testing_iterations:
                 if cur_psnr > best_psnr:
                     best_psnr = cur_psnr
