@@ -132,7 +132,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 deform_model=deform,
             )
 
-        loss = image_loss + opt.lambda_traj * loss_traj
+        weighted_traj_loss = opt.lambda_traj * loss_traj
+        loss = image_loss + weighted_traj_loss
         loss.backward()
 
         iter_end.record()
@@ -144,10 +145,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                postfix = {"Loss": f"{ema_loss_for_log:.{7}f}"}
+                postfix = {
+                    "Loss": f"{ema_loss_for_log:.{7}f}",
+                    "Img": f"{image_loss.item():.{4}f}",
+                }
                 if traj_log.get("traj_enabled", 0.0):
-                    postfix["Traj"] = f"{loss_traj.item():.{4}f}"
-                    postfix["TrajValid"] = int(traj_log.get("traj_num_valid", 0.0))
+                    postfix["TrajRaw"] = f"{loss_traj.item():.{4}f}"
+                    postfix["TrajW"] = f"{weighted_traj_loss.item():.{4}f}"
+                    postfix["Valid"] = int(traj_log.get("traj_num_valid", 0.0))
                 progress_bar.set_postfix(postfix)
                 progress_bar.update(10)
             if iteration == opt.iterations:
@@ -163,6 +168,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                                        dataset.load2gpu_on_the_fly, dataset.is_6dof)
             if tb_writer and traj_log:
                 tb_writer.add_scalar('train_loss_patches/traj_loss', loss_traj.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/weighted_traj_loss', weighted_traj_loss.item(), iteration)
                 for key, value in traj_log.items():
                     tb_writer.add_scalar(f'train_traj/{key}', value, iteration)
             if iteration in testing_iterations:
