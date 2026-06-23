@@ -98,6 +98,9 @@ class OptimizationParams(ParamGroup):
         self.traj_start_iter = 3000
         self.traj_num_tracks_per_iter = 0
         self.traj_robust_delta = 1.0
+        self.warmup_depth_export = False
+        self.warmup_depth_iteration = 0
+        self.warmup_depth_output = ""
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500

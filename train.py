@@ -18,6 +18,7 @@ import sys
 from scene import Scene, GaussianModel, DeformModel
 from utils.general_utils import safe_state, get_linear_noise_func
 from utils.traj_supervision_utils import TrajectorySupervisor, TrajectorySupervisorConfig
+from utils.warmup_depth_utils import export_warmup_depth, should_export_warmup_depth, warmup_depth_iteration
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -68,6 +69,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     best_iteration = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=opt.iterations)
+    if opt.warmup_depth_export:
+        print(f"Warm-up depth export scheduled at iteration {warmup_depth_iteration(opt)}")
     for iteration in range(1, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -150,9 +153,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                     "Img": f"{image_loss.item():.{4}f}",
                 }
                 if traj_log.get("traj_enabled", 0.0):
-                    postfix["TrajRaw"] = f"{loss_traj.item():.{4}f}"
-                    postfix["TrajW"] = f"{weighted_traj_loss.item():.{4}f}"
-                    postfix["Valid"] = int(traj_log.get("traj_num_valid", 0.0))
+                    postfix["Traj"] = f"{loss_traj.item():.{4}f}"
                 progress_bar.set_postfix(postfix)
                 progress_bar.update(10)
             if iteration == opt.iterations:
@@ -202,6 +203,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 deform.optimizer.zero_grad()
                 deform.update_learning_rate(iteration)
+
+            if should_export_warmup_depth(opt, iteration):
+                depth_path, num_frames, valid_fraction = export_warmup_depth(
+                    scene=scene,
+                    gaussians=gaussians,
+                    pipe=pipe,
+                    background=background,
+                    dataset=dataset,
+                    opt=opt,
+                    iteration=iteration,
+                )
+                print(
+                    f"\n[ITER {iteration}] Warm-up depth saved to {depth_path} "
+                    f"({num_frames} frames, valid fraction {valid_fraction:.4f})"
+                )
 
     print("Best test mPSNR/PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
