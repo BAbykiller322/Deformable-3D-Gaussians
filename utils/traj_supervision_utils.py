@@ -1,9 +1,10 @@
 """
 Trajectory supervision utilities for DyCheck + Deformable 3DGS.
 
-This module is intentionally a design skeleton at this stage.  It defines the
-expected data flow for L_traj without implementing the core projection,
-deformation, or optimization logic yet.
+This module implements the data flow for L_traj.  The current preprocessing
+stores anchors as camera-center/ray/depth tuples to avoid baking camera
+convention assumptions into the npz; this loader reconstructs anchor_xyz for
+the differentiable trajectory loss.
 
 Planned supervision signal:
     MDE anchor at reference frame t0
@@ -131,16 +132,21 @@ def load_anchor_npz(anchors_path: str, strategy: str) -> Dict[str, np.ndarray]:
     suffix = strategy.strip()
     if not suffix:
         raise ValueError("strategy must be a non-empty string")
-    required_by_output_key = {
+    common_keys = {
         "valid": f"valid_{suffix}",
-        "anchor_xyz": f"anchor_xyz_{suffix}",
         "anchor_xy": f"anchor_xy_{suffix}",
         "anchor_t0_idx": f"anchor_t0_idx_{suffix}",
         "anchor_warp": f"anchor_warp_{suffix}",
     }
+    ray_depth_keys = {
+        "anchor_camera_center": f"anchor_camera_center_{suffix}",
+        "anchor_ray_step": f"anchor_ray_step_{suffix}",
+        "anchor_depth0": f"anchor_depth0_{suffix}",
+    }
+    legacy_xyz_key = f"anchor_xyz_{suffix}"
 
     with np.load(anchors_path, allow_pickle=False) as npz:
-        missing = [key for key in required_by_output_key.values() if key not in npz]
+        missing = [key for key in common_keys.values() if key not in npz]
         if missing:
             available_strategies = sorted(
                 key[len("valid_") :] for key in npz.files if key.startswith("valid_")
@@ -150,13 +156,35 @@ def load_anchor_npz(anchors_path: str, strategy: str) -> Dict[str, np.ndarray]:
                 f"{missing}. Available strategies: {available_strategies or 'none'}."
             )
 
-        valid = np.asarray(npz[required_by_output_key["valid"]], dtype=np.bool_)
-        anchor_xyz = np.asarray(npz[required_by_output_key["anchor_xyz"]], dtype=np.float32)
-        anchor_xy = np.asarray(npz[required_by_output_key["anchor_xy"]], dtype=np.float32)
-        anchor_t0_idx = np.asarray(
-            npz[required_by_output_key["anchor_t0_idx"]], dtype=np.int64
-        )
-        anchor_warp = np.asarray(npz[required_by_output_key["anchor_warp"]], dtype=np.int64)
+        valid = np.asarray(npz[common_keys["valid"]], dtype=np.bool_)
+        anchor_xy = np.asarray(npz[common_keys["anchor_xy"]], dtype=np.float32)
+        anchor_t0_idx = np.asarray(npz[common_keys["anchor_t0_idx"]], dtype=np.int64)
+        anchor_warp = np.asarray(npz[common_keys["anchor_warp"]], dtype=np.int64)
+
+        has_ray_depth = all(key in npz for key in ray_depth_keys.values())
+        if has_ray_depth:
+            anchor_camera_center = np.asarray(
+                npz[ray_depth_keys["anchor_camera_center"]], dtype=np.float32
+            )
+            anchor_ray_step = np.asarray(
+                npz[ray_depth_keys["anchor_ray_step"]], dtype=np.float32
+            )
+            anchor_depth0 = np.asarray(npz[ray_depth_keys["anchor_depth0"]], dtype=np.float32)
+            anchor_xyz = anchor_camera_center + anchor_depth0[:, None] * anchor_ray_step
+            anchor_format = "ray_depth"
+        elif legacy_xyz_key in npz:
+            anchor_xyz = np.asarray(npz[legacy_xyz_key], dtype=np.float32)
+            anchor_format = "legacy_xyz"
+            anchor_camera_center = None
+            anchor_ray_step = None
+            anchor_depth0 = None
+        else:
+            missing_ray_depth = [key for key in ray_depth_keys.values() if key not in npz]
+            raise KeyError(
+                f"Missing anchor geometry for strategy '{suffix}' in {anchors_path}. "
+                f"Expected ray-depth fields {missing_ray_depth} or legacy field "
+                f"{legacy_xyz_key}."
+            )
 
         result: Dict[str, np.ndarray] = {
             "valid": np.ascontiguousarray(valid),
@@ -164,15 +192,30 @@ def load_anchor_npz(anchors_path: str, strategy: str) -> Dict[str, np.ndarray]:
             "anchor_xy": np.ascontiguousarray(anchor_xy),
             "anchor_t0_idx": anchor_t0_idx,
             "anchor_warp": anchor_warp,
+            "anchor_format": np.asarray(anchor_format),
         }
 
-        depth_key = f"anchor_depth_{suffix}"
-        if depth_key in npz:
-            result["anchor_depth"] = np.asarray(npz[depth_key], dtype=np.float32)
+        if has_ray_depth:
+            result["anchor_camera_center"] = np.ascontiguousarray(anchor_camera_center)
+            result["anchor_ray_step"] = np.ascontiguousarray(anchor_ray_step)
+            result["anchor_depth0"] = np.ascontiguousarray(anchor_depth0)
 
-        for key in ("scene", "resolution", "model_id", "depth_convention", "coordinate_space"):
+        for key in (
+            "scene",
+            "resolution",
+            "model_id",
+            "depth_source",
+            "depth_convention",
+            "coordinate_space",
+            "anchor_xyz_status",
+            "warmup_depth_path",
+        ):
             if key in npz:
                 result[key] = np.asarray(npz[key])
+
+        depth_alignment_key = f"depth_alignment_{suffix}"
+        if depth_alignment_key in npz:
+            result["depth_alignment"] = np.asarray(npz[depth_alignment_key])
 
     if valid.ndim != 1:
         raise ValueError(f"valid must have shape [P], got {valid.shape} in {anchors_path}")
@@ -184,6 +227,22 @@ def load_anchor_npz(anchors_path: str, strategy: str) -> Dict[str, np.ndarray]:
             "anchor_xyz must have shape [P, 3] matching valid, "
             f"got {anchor_xyz.shape} for P={num_anchors} in {anchors_path}"
         )
+    if has_ray_depth:
+        if anchor_camera_center.shape != (num_anchors, 3):
+            raise ValueError(
+                "anchor_camera_center must have shape [P, 3] matching valid, "
+                f"got {anchor_camera_center.shape} for P={num_anchors} in {anchors_path}"
+            )
+        if anchor_ray_step.shape != (num_anchors, 3):
+            raise ValueError(
+                "anchor_ray_step must have shape [P, 3] matching valid, "
+                f"got {anchor_ray_step.shape} for P={num_anchors} in {anchors_path}"
+            )
+        if anchor_depth0.shape != (num_anchors,):
+            raise ValueError(
+                "anchor_depth0 must have shape [P] matching valid, "
+                f"got {anchor_depth0.shape} for P={num_anchors} in {anchors_path}"
+            )
     if anchor_xy.shape != (num_anchors, 2):
         raise ValueError(
             "anchor_xy must have shape [P, 2] matching valid, "
@@ -199,6 +258,13 @@ def load_anchor_npz(anchors_path: str, strategy: str) -> Dict[str, np.ndarray]:
             "anchor_warp must have shape [P] matching valid, "
             f"got {anchor_warp.shape} for P={num_anchors} in {anchors_path}"
         )
+
+    finite_xyz = np.isfinite(anchor_xyz).all(axis=1)
+    valid &= finite_xyz
+    anchor_xyz = anchor_xyz.copy()
+    anchor_xyz[~valid] = 0.0
+    result["anchor_xyz"] = np.ascontiguousarray(anchor_xyz)
+    result["valid"] = np.ascontiguousarray(valid)
     return result
 
 
